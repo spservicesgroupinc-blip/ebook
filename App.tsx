@@ -69,19 +69,24 @@ const App: React.FC = () => {
       try {
         const savedUser = localStorage.getItem('lore_user');
         if (savedUser) {
-          setUser(JSON.parse(savedUser));
-        }
+          const parsedUser = JSON.parse(savedUser);
+          setUser(parsedUser);
 
-        const loadedProjects = await StorageService.getAllProjects();
-        setProjects(loadedProjects);
-        
-        const lastActiveId = await StorageService.getActiveProjectId();
-        if (lastActiveId && loadedProjects.find(p => p.id === lastActiveId)) {
-          setActiveProjectId(lastActiveId);
-          setView(AppView.EDITOR);
-          window.history.replaceState({ view: AppView.EDITOR, projectId: lastActiveId }, '');
-        } else if (savedUser) {
-           setView(AppView.DASHBOARD);
+          const loadedProjects = await StorageService.getAllProjects(parsedUser.username);
+          // Initialize last synced state so we don't spam the server on load
+          loadedProjects.forEach((p: BookProject) => {
+            lastSyncedProjectsRef.current[p.id] = p.lastModified;
+          });
+          setProjects(loadedProjects);
+          
+          const lastActiveId = await StorageService.getActiveProjectId(parsedUser.username);
+          if (lastActiveId && loadedProjects.find((p: BookProject) => p.id === lastActiveId)) {
+            setActiveProjectId(lastActiveId);
+            setView(AppView.EDITOR);
+            window.history.replaceState({ view: AppView.EDITOR, projectId: lastActiveId }, '');
+          } else {
+             setView(AppView.DASHBOARD);
+          }
         }
       } catch (e) {
         console.error("Failed to load data", e);
@@ -94,12 +99,12 @@ const App: React.FC = () => {
 
   // Save changes to Local Storage
   useEffect(() => {
-    if (!isLoaded) return; 
+    if (!isLoaded || !user) return; 
 
     const saveData = async () => {
       try {
-        await StorageService.saveAllProjects(projects);
-        await StorageService.saveActiveProjectId(activeProjectId);
+        await StorageService.saveAllProjects(user.username, projects);
+        await StorageService.saveActiveProjectId(user.username, activeProjectId);
       } catch (e: any) {
         if (e.name === 'QuotaExceededError') {
            alert("⚠️ Disk Full! Your device storage is full.");
@@ -111,29 +116,31 @@ const App: React.FC = () => {
 
     const timeout = setTimeout(saveData, 500);
     return () => clearTimeout(timeout);
-  }, [projects, activeProjectId, isLoaded]);
+  }, [projects, activeProjectId, isLoaded, user]);
 
-  // Auto-save active project to Cloud (Debounced)
+  const lastSyncedProjectsRef = useRef<Record<string, number>>({});
+
+  // Auto-save modified projects to Cloud (Debounced)
   useEffect(() => {
-    if (!user || !activeProjectId) return;
-    
-    const projectToSave = projects.find(p => p.id === activeProjectId);
-    if (!projectToSave) return;
+    if (!user || projects.length === 0) return;
 
-    // We debounce cloud saves to avoid overwhelming Apps Script (which is slow)
-    // 5 seconds after last change, we push to cloud
     const timeout = setTimeout(async () => {
-        try {
-            // Quietly sync up
-            await CloudService.syncUp(user, projectToSave);
-            console.log(`Cloud auto-save complete for ${projectToSave.title}`);
-        } catch (e) {
-            console.error("Cloud auto-save failed", e);
+        for (const project of projects) {
+          const lastSynced = lastSyncedProjectsRef.current[project.id] || 0;
+          if (project.lastModified > lastSynced) {
+            try {
+                await CloudService.syncUp(user, project);
+                lastSyncedProjectsRef.current[project.id] = project.lastModified;
+                console.log(`Cloud auto-save complete for ${project.title}`);
+            } catch (e) {
+                console.error(`Cloud auto-save failed for ${project.title}`, e);
+            }
+          }
         }
     }, 5000); 
 
     return () => clearTimeout(timeout);
-  }, [projects, activeProjectId, user]);
+  }, [projects, user]);
 
   // Handle Browser Back Button
   useEffect(() => {
@@ -284,6 +291,11 @@ const App: React.FC = () => {
      if (!originalProject.seriesId) {
         const updatedOriginal = { ...originalProject, seriesId, seriesIndex: 1 };
         handleUpdateProject(updatedOriginal);
+        if (user) {
+          try {
+            CloudService.syncUp(user, updatedOriginal).catch(console.error);
+          } catch(e) {}
+        }
      }
 
      const contextContent = `PREVIOUS BOOK CONTEXT:
@@ -324,7 +336,7 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
     setProjects(prev => prev.map(p => p.id === updatedProject.id ? updatedProject : p));
   };
 
-  const handleDeleteProject = (id: string, e: React.MouseEvent) => {
+  const handleDeleteProject = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (window.confirm('Are you sure you want to delete this project? This action cannot be undone.')) {
       setProjects(prev => prev.filter(p => p.id !== id));
@@ -332,6 +344,13 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
         setActiveProjectId(null);
         setView(AppView.DASHBOARD);
         window.history.replaceState({ view: AppView.DASHBOARD }, '');
+      }
+      if (user) {
+        try {
+          await CloudService.deleteProject(user, id);
+        } catch (error) {
+          console.error("Failed to delete project from cloud", error);
+        }
       }
     }
   };
@@ -354,32 +373,42 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
     localStorage.setItem('lore_user', JSON.stringify(user));
 
     try {
+        // First load any local projects for this specific user
+        const localProjects = await StorageService.getAllProjects(user.username);
+        
         // Automatically sync down from cloud to get previous books
         const cloudProjects = await CloudService.syncDown(user);
         
-        // Merge Strategy: Combine cloud and local. If ID exists in both, prefer the one with newer timestamp.
-        setProjects(prev => {
-            const merged = [...prev];
-            cloudProjects.forEach(cp => {
-                const existingIdx = merged.findIndex(p => p.id === cp.id);
-                if (existingIdx !== -1) {
-                    // Update if cloud version is newer
-                    if (cp.lastModified > merged[existingIdx].lastModified) {
-                        merged[existingIdx] = cp;
-                    }
-                } else {
-                    // Add new from cloud
-                    merged.push(cp);
+        // Merge Strategy: Combine cloud and local for this user
+        const merged = [...localProjects];
+        cloudProjects.forEach(cp => {
+            const existingIdx = merged.findIndex(p => p.id === cp.id);
+            if (existingIdx !== -1) {
+                // Update if cloud version is newer
+                if (cp.lastModified > merged[existingIdx].lastModified) {
+                    merged[existingIdx] = cp;
                 }
-            });
-            // Persist merged state to local storage immediately
-            StorageService.saveAllProjects(merged);
-            return merged;
+            } else {
+                // Add new from cloud
+                merged.push(cp);
+            }
         });
+        
+        merged.forEach((p: BookProject) => {
+          lastSyncedProjectsRef.current[p.id] = p.lastModified;
+        });
+
+        setProjects(merged);
+        // Persist merged state to local storage immediately
+        StorageService.saveAllProjects(user.username, merged);
 
     } catch(e) {
         console.error("Auto-sync on login failed", e);
-        // We continue to dashboard even if sync fails, so user isn't stuck
+        // Just load local if sync fails
+        try {
+          const localProjects = await StorageService.getAllProjects(user.username);
+          setProjects(localProjects);
+        } catch(e2) {}
     } finally {
         setIsLoggingIn(false);
         setView(AppView.DASHBOARD);
@@ -388,6 +417,8 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
 
   const handleLogout = () => {
     setUser(undefined);
+    setProjects([]);
+    setActiveProjectId(null);
     localStorage.removeItem('lore_user');
     setView(AppView.AUTH);
   };
@@ -403,6 +434,9 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
           } else {
               merged.push(cp);
           }
+      });
+      merged.forEach(p => {
+        lastSyncedProjectsRef.current[p.id] = p.lastModified;
       });
       setProjects(merged);
   };

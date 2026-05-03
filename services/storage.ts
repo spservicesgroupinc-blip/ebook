@@ -6,9 +6,9 @@ const STORE_PROJECTS = 'projects';
 const STORE_SETTINGS = 'settings';
 const VERSION = 1;
 
-const initDB = (): Promise<IDBDatabase> => {
+const initDB = (username: string): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, VERSION);
+    const request = indexedDB.open(`${DB_NAME}_${username}`, VERSION);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
     request.onupgradeneeded = (event) => {
@@ -24,21 +24,21 @@ const initDB = (): Promise<IDBDatabase> => {
 };
 
 export const StorageService = {
-  async getAllProjects(): Promise<BookProject[]> {
+  async getAllProjects(username: string): Promise<BookProject[]> {
     // 1. Attempt Legacy Migration (LocalStorage -> IndexedDB)
     try {
         const legacy = localStorage.getItem('storyforge_projects');
         if (legacy) {
             console.log("Migrating legacy data to IndexedDB...");
             const projects = JSON.parse(legacy);
-            await this.saveAllProjects(projects); 
+            await this.saveAllProjects(username, projects); 
             localStorage.removeItem('storyforge_projects'); // Clear legacy to free up space
             return projects;
         }
     } catch(e) { console.error("Migration failed", e); }
 
     // 2. Load from IndexedDB
-    const db = await initDB();
+    const db = await initDB(username);
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_PROJECTS, 'readonly');
       const store = tx.objectStore(STORE_PROJECTS);
@@ -48,16 +48,13 @@ export const StorageService = {
     });
   },
 
-  async saveAllProjects(projects: BookProject[]): Promise<void> {
-    const db = await initDB();
+  async saveAllProjects(username: string, projects: BookProject[]): Promise<void> {
+    const db = await initDB(username);
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_PROJECTS, 'readwrite');
       const store = tx.objectStore(STORE_PROJECTS);
       
-      // Clear and rewrite ensures sync with React state. 
-      // Since IDB is fast, this is acceptable for typical usage.
       const clearReq = store.clear();
-      
       clearReq.onsuccess = () => {
          projects.forEach(p => store.put(p));
       };
@@ -67,16 +64,15 @@ export const StorageService = {
     });
   },
   
-  async getActiveProjectId(): Promise<string | null> {
-    // Check legacy first
+  async getActiveProjectId(username: string): Promise<string | null> {
     const legacyId = localStorage.getItem('storyforge_active_project');
     if (legacyId) {
         localStorage.removeItem('storyforge_active_project');
-        await this.saveActiveProjectId(legacyId);
+        await this.saveActiveProjectId(username, legacyId);
         return legacyId;
     }
 
-    const db = await initDB();
+    const db = await initDB(username);
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_SETTINGS, 'readonly');
       const store = tx.objectStore(STORE_SETTINGS);
@@ -86,8 +82,8 @@ export const StorageService = {
     });
   },
 
-  async saveActiveProjectId(id: string | null): Promise<void> {
-    const db = await initDB();
+  async saveActiveProjectId(username: string, id: string | null): Promise<void> {
+    const db = await initDB(username);
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_SETTINGS, 'readwrite');
       const store = tx.objectStore(STORE_SETTINGS);

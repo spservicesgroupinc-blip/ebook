@@ -15,11 +15,12 @@ export interface CostSummary {
 }
 
 // Pricing Rates (Estimated based on public Pay-as-you-go rates)
-// Rates are per 1 Million Tokens unless specified
+// Rates are per 1 Million Tokens unless specified.
+// NOTE: These are ESTIMATES. For accurate billing, check the official GCP Pricing page.
 const RATES: Record<string, { input: number; output: number; type: 'token' | 'image' | 'char' }> = {
-  // Flash (approx $0.075 / $0.30)
+  // Flash (approx $0.075 / $0.30 per 1M tokens)
   'gemini-3-flash-preview': { input: 0.075, output: 0.30, type: 'token' },
-  // Pro (approx $3.50 / $10.50)
+  // Pro (approx $3.50 / $10.50 per 1M tokens)
   'gemini-3-pro-preview': { input: 3.50, output: 10.50, type: 'token' },
   // Image (approx $0.04 per image)
   'gemini-3-pro-image-preview': { input: 0.04, output: 0, type: 'image' },

@@ -1,100 +1,222 @@
 /**
- * Google Apps Script to generate a Google Doc from StoryForge JSON data.
- * 
- * INSTRUCTIONS:
- * 1. Create a new project at https://script.google.com/
- * 2. Paste this code into Code.gs
- * 3. Click "Deploy" -> "New deployment"
- * 4. Select type: "Web app"
- * 5. Description: "StoryForge API"
- * 6. Execute as: "Me"
- * 7. Who has access: "Anyone" (Important for the web app to reach it without OAuth complexity)
- * 8. Click "Deploy"
- * 9. Copy the "Web app URL" and paste it into the StoryForge app when prompted.
+ * Lore Cloud Backend
+ * Handles User Auth (Sheets), Book Storage (Drive), and Doc Export.
  */
 
-function doPost(e) {
-  // CORS Helper: Handle preflight or ensure we return JSON properly
-  // Note: Simple triggers don't handle OPTIONS, but the web app simply receives POST.
-  
+const SCRIPT_PROP = PropertiesService.getScriptProperties();
+const SHEET_NAME = "LoreUsers";
+const PROP_SS_ID = "DB_SS_ID";
+
+// Robustly get or create the database spreadsheet
+function getDbSpreadsheet() {
+  const id = SCRIPT_PROP.getProperty(PROP_SS_ID);
+  if (id) {
+    try {
+      return SpreadsheetApp.openById(id);
+    } catch(e) {
+      console.warn("Cached ID invalid, ignoring.");
+    }
+  }
+
   try {
-    // Parse the incoming JSON body
-    // Apps Script receives POST data in e.postData.contents
-    var requestData = JSON.parse(e.postData.contents);
-    
-    // Create the document
-    var docTitle = requestData.title || "Untitled StoryForge Manuscript";
-    var doc = DocumentApp.create(docTitle);
-    var body = doc.getBody();
-    
-    // -- Formatting --
-    
-    // Title
-    body.insertParagraph(0, docTitle)
-        .setHeading(DocumentApp.ParagraphHeading.TITLE);
-    
-    // Description/Synopsis
-    if (requestData.description) {
-      body.appendParagraph(requestData.description)
-          .setHeading(DocumentApp.ParagraphHeading.SUBTITLE);
+    const active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) {
+      SCRIPT_PROP.setProperty(PROP_SS_ID, active.getId());
+      return active;
     }
-    
-    body.appendPageBreak();
-    
-    // Process Chapters
-    if (requestData.chapters && Array.isArray(requestData.chapters)) {
-      requestData.chapters.forEach(function(chapter) {
-        // Chapter Title
-        var titleText = "Chapter " + chapter.chapterNumber + ": " + (chapter.title || "Untitled");
-        body.appendParagraph(titleText)
-            .setHeading(DocumentApp.ParagraphHeading.HEADING1);
-        
-        // Chapter Content
-        if (chapter.content) {
-          // Basic cleanup: Remove markdown bold/italic markers if desired, 
-          // or ideally, use a markdown parser. 
-          // For this simple script, we strip some common MD chars to keep it clean.
-          var cleanContent = chapter.content
-            .replace(/^#+\s/gm, '') // Remove headers
-            .replace(/\*\*/g, '')   // Remove bold
-            .replace(/\*/g, '')     // Remove italic
-            .replace(/`/g, '');     // Remove code ticks
-            
-          body.appendParagraph(cleanContent)
-              .setHeading(DocumentApp.ParagraphHeading.NORMAL);
-        } else {
-          body.appendParagraph("[Chapter content not generated yet]")
-              .setHeading(DocumentApp.ParagraphHeading.NORMAL)
-              .setItalic(true);
-        }
-        
-        body.appendPageBreak();
-      });
-    }
-    
-    // Save and get URL
-    doc.saveAndClose();
-    var url = doc.getUrl();
-    
-    // Return Success JSON
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "success",
-      url: url,
-      message: "Document created successfully"
-    })).setMimeType(ContentService.MimeType.JSON);
-    
-  } catch (error) {
-    // Return Error JSON
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "error",
-      message: error.toString()
-    })).setMimeType(ContentService.MimeType.JSON);
+  } catch(e) {}
+
+  try {
+    const newSS = SpreadsheetApp.create("Lore_App_Database");
+    SCRIPT_PROP.setProperty(PROP_SS_ID, newSS.getId());
+    return newSS;
+  } catch(e) {
+    throw new Error("Fatal: Could not create database spreadsheet. Check Drive permissions.");
   }
 }
 
-/**
- * Handle GET requests just to confirm the app is running.
- */
-function doGet(e) {
-  return ContentService.createTextOutput("StoryForge Docs API is running. Send a POST request to create a document.");
+function setup() {
+  const doc = getDbSpreadsheet();
+  if (!doc) throw new Error("Database Spreadsheet is null");
+  
+  let sheet = doc.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = doc.insertSheet(SHEET_NAME);
+    sheet.appendRow(["Created", "Username", "PasswordHash", "FolderID"]);
+    sheet.getRange(1, 1, 1, 4).setFontWeight("bold");
+  }
+  return "Setup Complete. Database URL: " + doc.getUrl();
+}
+
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  lock.tryLock(30000);
+
+  try {
+    if (!e || !e.postData || !e.postData.contents) {
+      return response({ status: "error", message: "No post data received" });
+    }
+
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+
+    const doc = getDbSpreadsheet();
+
+    if (action === "signup") return signUp(data, doc);
+    
+    // For all other actions, authenticate first
+    const user = authenticateUser(data, doc); 
+    if (action === "login") return response({ status: "success", username: user[1], folderId: user[3] });
+    
+    // Pass the authenticated user's folderId to other functions to ensure strict isolation
+    if (action === "syncUp") return saveProject(data, user[3]);
+    if (action === "syncDown") return loadProjects(user[3]);
+    if (action === "exportDoc") return exportToDoc(data, user[3]);
+
+    return response({ status: "error", message: "Invalid action: " + action });
+
+  } catch (e) {
+    return response({ status: "error", message: e.toString() });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// --- Auth Functions ---
+
+function authenticateUser(data, doc) {
+  const { username, password } = data;
+  if (!username || !password) throw new Error("Missing credentials");
+
+  let sheet = doc.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+     setup();
+     sheet = doc.getSheetByName(SHEET_NAME);
+  }
+  
+  const users = sheet.getDataRange().getValues();
+  const passHash = Utilities.base64Encode(password);
+  const user = users.find(r => r[1] === username && r[2] === passHash);
+
+  if (!user) throw new Error("Invalid username or password");
+  return user;
+}
+
+function signUp(data, doc) {
+  const { username, password } = data;
+  if (!username || !password) throw new Error("Missing credentials");
+
+  let sheet = doc.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+     setup();
+     sheet = doc.getSheetByName(SHEET_NAME);
+  }
+
+  const users = sheet.getDataRange().getValues();
+  const exists = users.find(r => r[1] === username);
+  if (exists) throw new Error("Username already taken");
+
+  const folder = DriveApp.createFolder("Lore_Library_" + username);
+  const folderId = folder.getId();
+
+  const passHash = Utilities.base64Encode(password);
+  sheet.appendRow([new Date(), username, passHash, folderId]);
+
+  return response({ 
+    status: "success", 
+    username: username, 
+    folderId: folderId,
+    message: "Account created successfully"
+  });
+}
+
+// --- Drive Functions ---
+
+function saveProject(data, folderId) {
+  const { project } = data;
+  if (!folderId || !project) throw new Error("Missing data");
+
+  const folder = DriveApp.getFolderById(folderId);
+  const fileName = `lore_backup_${project.id}.json`;
+
+  // Check if file exists to update it, otherwise create new
+  const files = folder.getFilesByName(fileName);
+  if (files.hasNext()) {
+    const file = files.next();
+    file.setContent(JSON.stringify(project));
+  } else {
+    folder.createFile(fileName, JSON.stringify(project), "application/json");
+  }
+
+  return response({ status: "success", message: "Saved to Drive" });
+}
+
+function loadProjects(folderId) {
+  const folder = DriveApp.getFolderById(folderId);
+  
+  // Optimized search for specific backup files
+  const files = folder.searchFiles("title contains 'lore_backup_' and trashed = false");
+  const projects = [];
+
+  while (files.hasNext()) {
+    const file = files.next();
+    try {
+      const json = JSON.parse(file.getBlob().getDataAsString());
+      // Ensure ID matches fallback if missing
+      if (!json.id) json.id = file.getName().replace("lore_backup_", "").replace(".json", "");
+      projects.push(json);
+    } catch (e) {
+      // Skip malformed files
+    }
+  }
+
+  return response({ status: "success", projects: projects });
+}
+
+function exportToDoc(data, folderId) {
+  const { title, description, chapters } = data;
+  if (!folderId) throw new Error("Missing folder ID");
+  
+  const folder = DriveApp.getFolderById(folderId);
+  const docName = title || "Untitled Manuscript";
+  
+  const doc = DocumentApp.create(docName);
+  const file = DriveApp.getFileById(doc.getId());
+  file.moveTo(folder);
+  
+  const body = doc.getBody();
+  
+  body.insertParagraph(0, docName).setHeading(DocumentApp.ParagraphHeading.TITLE);
+  
+  if (description) {
+    body.appendParagraph(description).setHeading(DocumentApp.ParagraphHeading.SUBTITLE);
+  }
+  
+  body.appendPageBreak();
+  
+  if (chapters && Array.isArray(chapters)) {
+    chapters.forEach(chap => {
+      const chapTitle = (chap.chapterNumber === 0 ? "Introduction" : `Chapter ${chap.chapterNumber}`) + (chap.title ? `: ${chap.title}` : "");
+      
+      body.appendParagraph(chapTitle).setHeading(DocumentApp.ParagraphHeading.HEADING1);
+      
+      if (chap.content) {
+        // Strip basic markdown symbols for cleaner doc
+        const text = chap.content
+          .replace(/#{1,6}\s/g, '') // Headers
+          .replace(/\*\*/g, '')     // Bold
+          .replace(/\*/g, '');      // Italic
+        body.appendParagraph(text).setHeading(DocumentApp.ParagraphHeading.NORMAL);
+      }
+      body.appendPageBreak();
+    });
+  }
+  
+  doc.saveAndClose();
+  return response({ status: "success", url: doc.getUrl(), message: "Google Doc Created" });
+}
+
+function response(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }

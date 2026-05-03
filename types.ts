@@ -58,6 +58,7 @@ export interface User {
   username: string;
   folderId: string;
   backendUrl: string; // The Google Apps Script URL
+  password?: string; // Optional for legacy, required for new requests
 }
 
 export enum AppView {

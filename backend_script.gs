@@ -64,10 +64,16 @@ function doPost(e) {
     const doc = getDbSpreadsheet();
 
     if (action === "signup") return signUp(data, doc);
-    if (action === "login") return login(data, doc);
-    if (action === "syncUp") return saveProject(data);
-    if (action === "syncDown") return loadProjects(data);
-    if (action === "exportDoc") return exportToDoc(data);
+    
+    // For all other actions, authenticate first
+    const user = authenticateUser(data, doc); 
+    if (action === "login") return response({ status: "success", username: user[1], folderId: user[3] });
+    
+    // Pass the authenticated user's folderId to other functions to ensure strict isolation
+    if (action === "syncUp") return saveProject(data, user[3]);
+    if (action === "syncDown") return loadProjects(user[3]);
+    if (action === "exportDoc") return exportToDoc(data, user[3]);
+    if (action === "deleteProject") return deleteProject(data, user[3]);
 
     return response({ status: "error", message: "Invalid action: " + action });
 
@@ -79,6 +85,24 @@ function doPost(e) {
 }
 
 // --- Auth Functions ---
+
+function authenticateUser(data, doc) {
+  const { username, password } = data;
+  if (!username || !password) throw new Error("Missing credentials");
+
+  let sheet = doc.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+     setup();
+     sheet = doc.getSheetByName(SHEET_NAME);
+  }
+  
+  const users = sheet.getDataRange().getValues();
+  const passHash = Utilities.base64Encode(password);
+  const user = users.find(r => r[1] === username && r[2] === passHash);
+
+  if (!user) throw new Error("Invalid username or password");
+  return user;
+}
 
 function signUp(data, doc) {
   const { username, password } = data;
@@ -108,31 +132,10 @@ function signUp(data, doc) {
   });
 }
 
-function login(data, doc) {
-  const { username, password } = data;
-  let sheet = doc.getSheetByName(SHEET_NAME);
-  if (!sheet) {
-     setup();
-     sheet = doc.getSheetByName(SHEET_NAME);
-  }
-  
-  const users = sheet.getDataRange().getValues();
-  const passHash = Utilities.base64Encode(password);
-  const user = users.find(r => r[1] === username && r[2] === passHash);
-
-  if (!user) throw new Error("Invalid username or password");
-
-  return response({ 
-    status: "success", 
-    username: user[1], 
-    folderId: user[3] 
-  });
-}
-
 // --- Drive Functions ---
 
-function saveProject(data) {
-  const { folderId, project } = data;
+function saveProject(data, folderId) {
+  const { project } = data;
   if (!folderId || !project) throw new Error("Missing data");
 
   const folder = DriveApp.getFolderById(folderId);
@@ -150,8 +153,23 @@ function saveProject(data) {
   return response({ status: "success", message: "Saved to Drive" });
 }
 
-function loadProjects(data) {
-  const { folderId } = data;
+function deleteProject(data, folderId) {
+  const { projectId } = data;
+  if (!folderId || !projectId) throw new Error("Missing data");
+
+  const folder = DriveApp.getFolderById(folderId);
+  const fileName = `lore_backup_${projectId}.json`;
+
+  const files = folder.getFilesByName(fileName);
+  while (files.hasNext()) {
+    const file = files.next();
+    file.setTrashed(true);
+  }
+
+  return response({ status: "success", message: "Deleted from Drive" });
+}
+
+function loadProjects(folderId) {
   const folder = DriveApp.getFolderById(folderId);
   
   // Optimized search for specific backup files
@@ -173,8 +191,8 @@ function loadProjects(data) {
   return response({ status: "success", projects: projects });
 }
 
-function exportToDoc(data) {
-  const { folderId, title, description, chapters } = data;
+function exportToDoc(data, folderId) {
+  const { title, description, chapters } = data;
   if (!folderId) throw new Error("Missing folder ID");
   
   const folder = DriveApp.getFolderById(folderId);
