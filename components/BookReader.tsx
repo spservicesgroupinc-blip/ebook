@@ -110,8 +110,8 @@ export const BookReader: React.FC<BookReaderProps> = ({
     let isMounted = true;
 
     const generate = async () => {
-       // Allow DOM to render the PDF root
-       await new Promise(r => setTimeout(r, 1000));
+       // Allow DOM to render and images to load
+       await new Promise(r => setTimeout(r, 1500));
 
        if (!isMounted) return;
 
@@ -122,30 +122,28 @@ export const BookReader: React.FC<BookReaderProps> = ({
           return;
        }
 
-       // A4 width ~ 210mm. With 10mm margins L/R, content is 190mm.
-       // At ~96 DPI, 1mm ~ 3.78px. 190mm ~ 718px.
-       // We set container to 720px for safety.
        const opt = {
-          margin: [10, 10, 10, 10], // mm
+          margin: [20, 20, 20, 20], // 20mm margins
           filename: `${outline.title.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}.pdf`,
-          image: { type: 'jpeg', quality: 0.95 },
+          image: { type: 'jpeg', quality: 0.98 },
           html2canvas: { 
             scale: 2, 
             useCORS: true, 
             logging: false,
-            // Important: Matches the CSS width of pdf-root to prevent overflow
-            windowWidth: 900 
+            scrollY: 0,
+            scrollX: 0,
+            windowWidth: 640 // Match the width of pdf-root (210mm - 40mm = 170mm ≈ 642px)
           },
           jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-          pagebreak: { mode: ['css', 'legacy'] }
+          pagebreak: { mode: ['css', 'avoid-all'], before: '.pdf-page-break' }
        };
 
        try {
          await html2pdf().set(opt).from(element).save();
-         showNotification("PDF Downloaded!");
+         showNotification("PDF Downloaded successfully!");
        } catch(e) {
          console.error(e);
-         showNotification("PDF Generation Error", 'error');
+         showNotification("PDF Generation Error. Please try again.", 'error');
        } finally {
          if (isMounted) setIsPdfMode(false);
        }
@@ -308,54 +306,58 @@ export const BookReader: React.FC<BookReaderProps> = ({
 
       {isPdfMode && (
         <div className="fixed inset-0 z-[9999] bg-white overflow-y-auto">
-          <div className="fixed top-0 left-0 w-full h-full bg-white/95 flex flex-col items-center justify-center z-[10000]">
+          <div className="fixed top-0 left-0 w-full h-full bg-slate-50 flex flex-col items-center justify-center z-[10000]">
              <Loader2 size={64} className="animate-spin text-blue-600 mb-6" />
              <h2 className="text-3xl font-bold text-slate-800 mb-2">Generating PDF</h2>
-             <p className="text-slate-500">Rendering book layout...</p>
+             <p className="text-slate-500">Formatting book layout and taking snapshots...</p>
           </div>
 
-          {/* PDF Rendering Container */}
-          <div id="pdf-root" style={{ width: '720px', margin: '0 auto', background: 'white', padding: '40px 60px', minHeight: '100vh', boxSizing: 'border-box' }}>
-             <style>{`
-               .pdf-text { font-family: 'Georgia', serif; font-size: 13pt; line-height: 1.6; text-align: justify; color: #000; word-wrap: break-word; }
-               .pdf-title-page { height: 900px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; page-break-after: always; }
-               .pdf-chapter { page-break-before: always; margin-top: 40px; }
-               .pdf-chapter h2 { page-break-after: avoid; }
-               h1 { font-size: 42pt; margin-bottom: 20px; font-weight: bold; line-height: 1.1; color: #000; word-wrap: break-word; }
-               h2 { font-size: 28pt; margin-bottom: 25px; font-weight: bold; color: #000; }
-               p { margin-bottom: 1em; }
-               img { max-width: 100%; page-break-inside: avoid; }
-             `}</style>
+          <div className="absolute top-0 left-0 w-full flex justify-center pb-32">
+            {/* PDF Rendering Container - Width fixed to perfectly fit A4 (170mm width) */}
+            <div id="pdf-root" style={{ width: '640px', background: 'white' }}>
+               <style>{`
+                 .pdf-text { font-family: 'Georgia', serif; font-size: 11pt; line-height: 1.6; text-align: justify; color: #000; margin-bottom: 20px; }
+                 .pdf-text p { margin-bottom: 15px; }
+                 .pdf-text ul { padding-left: 20px; margin-bottom: 15px; list-style-type: disc; }
+                 .pdf-title-page { height: 230mm; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+                 .pdf-page-break { page-break-before: always; clear: both; }
+                 .pdf-chapter { margin-top: 10px; }
+                 .pdf-chapter-header { page-break-after: avoid; }
+                 h1 { font-family: 'Helvetica', 'Arial', sans-serif; font-size: 32pt; margin-bottom: 20px; font-weight: bold; line-height: 1.1; color: #000; word-wrap: break-word; }
+                 h2 { font-family: 'Helvetica', 'Arial', sans-serif; font-size: 24pt; margin-bottom: 20px; font-weight: bold; color: #000; word-wrap: break-word; }
+                 img { max-width: 100%; border-radius: 4px; }
+               `}</style>
 
-             <div className="pdf-title-page">
-                <h1>{outline.title}</h1>
-                {outline.coverImage && (
-                  <img 
-                    src={`data:image/jpeg;base64,${outline.coverImage}`} 
-                    style={{ width: '350px', height: 'auto', marginBottom: '40px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} 
-                  />
-                )}
-                <p style={{ fontSize: '18pt', fontStyle: 'italic', maxWidth: '500px' }}>{outline.description}</p>
-             </div>
-
-             {chapters.map((chap) => (
-               <div key={chap.chapterNumber} className="pdf-chapter">
-                  <div style={{textAlign: 'center', marginBottom: '40px'}}>
-                     <div style={{fontSize: '14pt', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: '10px', color: '#666'}}>
-                        {chap.chapterNumber === 0 ? 'INTRODUCTION' : `CHAPTER ${chap.chapterNumber}`}
-                     </div>
-                     <h2>{chap.title}</h2>
-                  </div>
-                  {chap.image && (
-                     <div style={{display: 'flex', justifyContent: 'center', marginBottom: '30px'}}>
-                        <img src={`data:image/jpeg;base64,${chap.image}`} style={{ maxWidth: '100%', borderRadius: '4px' }} />
-                     </div>
+               <div className="pdf-title-page">
+                  <h1>{outline.title}</h1>
+                  {outline.coverImage && (
+                    <img 
+                      src={`data:image/jpeg;base64,${outline.coverImage}`} 
+                      style={{ width: '320px', height: 'auto', marginBottom: '40px', border: '1px solid #eaeaea' }} 
+                    />
                   )}
-                  <div className="pdf-text">
-                     <ReactMarkdown>{chap.content}</ReactMarkdown>
-                  </div>
+                  <p style={{ fontSize: '14pt', fontStyle: 'italic', maxWidth: '500px', margin: '0 auto', color: '#444' }}>{outline.description}</p>
                </div>
-             ))}
+
+               {chapters.map((chap, i) => (
+                 <div key={chap.chapterNumber} className="pdf-page-break pdf-chapter">
+                    <div className="pdf-chapter-header" style={{textAlign: 'center', marginBottom: '30px', marginTop: '20px'}}>
+                       <div style={{fontSize: '12pt', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: '8px', color: '#666', fontWeight: 'bold'}}>
+                          {chap.chapterNumber === 0 ? 'INTRODUCTION' : `CHAPTER ${chap.chapterNumber}`}
+                       </div>
+                       <h2>{chap.title}</h2>
+                    </div>
+                    {chap.image && (
+                       <div style={{display: 'flex', justifyContent: 'center', marginBottom: '30px'}}>
+                          <img src={`data:image/jpeg;base64,${chap.image}`} style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain' }} />
+                       </div>
+                    )}
+                    <div className="pdf-text">
+                       <ReactMarkdown>{chap.content}</ReactMarkdown>
+                    </div>
+                 </div>
+               ))}
+            </div>
           </div>
         </div>
       )}
