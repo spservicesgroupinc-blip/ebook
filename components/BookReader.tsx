@@ -122,6 +122,15 @@ export const BookReader: React.FC<BookReaderProps> = ({
           return;
        }
 
+       // Clone the element to render off-screen without scroll/UI interference
+       const clone = element.cloneNode(true) as HTMLElement;
+       clone.id = 'pdf-root-clone';
+       clone.style.position = 'absolute';
+       clone.style.top = '0px';
+       clone.style.left = '-9999px';
+       clone.style.width = '640px';
+       document.body.appendChild(clone);
+
        const opt = {
           margin: [20, 20, 20, 20], // 20mm margins
           filename: `${outline.title.replace(/[^a-z0-9]/gi, '_').substring(0, 30)}.pdf`,
@@ -132,19 +141,20 @@ export const BookReader: React.FC<BookReaderProps> = ({
             logging: false,
             scrollY: 0,
             scrollX: 0,
-            windowWidth: 640 // Match the width of pdf-root (210mm - 40mm = 170mm ≈ 642px)
+            windowWidth: 640
           },
           jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
           pagebreak: { mode: ['css', 'avoid-all'], before: '.pdf-page-break' }
        };
 
        try {
-         await html2pdf().set(opt).from(element).save();
+         await html2pdf().set(opt).from(clone).save();
          showNotification("PDF Downloaded successfully!");
        } catch(e) {
          console.error(e);
          showNotification("PDF Generation Error. Please try again.", 'error');
        } finally {
+         document.body.removeChild(clone);
          if (isMounted) setIsPdfMode(false);
        }
     };
@@ -312,9 +322,9 @@ export const BookReader: React.FC<BookReaderProps> = ({
              <p className="text-slate-500">Formatting book layout and taking snapshots...</p>
           </div>
 
-          <div className="absolute top-0 left-0 w-full flex justify-center pb-32">
+          <div className="absolute top-0 left-0 pb-32">
             {/* PDF Rendering Container - Width fixed to perfectly fit A4 (170mm width) */}
-            <div id="pdf-root" style={{ width: '640px', background: 'white' }}>
+            <div id="pdf-root" style={{ width: '640px', background: 'white', margin: 0, padding: 0 }}>
                <style>{`
                  .pdf-text { font-family: 'Georgia', serif; font-size: 11pt; line-height: 1.6; text-align: justify; color: #000; margin-bottom: 20px; }
                  .pdf-text p { margin-bottom: 15px; }
